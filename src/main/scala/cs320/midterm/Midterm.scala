@@ -27,16 +27,6 @@ trait Midterm extends Homework with RegexParsers {
 
   object FunDef extends ParserObject(d)
 
-  // Types
-  sealed trait Type
-  case object IntT extends Type
-  case object BooleanT extends Type
-  case object TupleT extends Type
-  case object ListT extends Type
-  case object FunctionT extends Type
-
-  object Type extends ParserObject(t)
-
   // Values
   sealed trait Value {
     override def toString: String = this match {
@@ -52,11 +42,6 @@ trait Midterm extends Homework with RegexParsers {
   // Environments
   type Env = Map[String, Value]
 
-  // Interpreter
-  def run(str: String): String = interp(Expr(str)).toString
-  def interp(expr: Expr): Value = interp(expr, Map.empty)
-  def interp(expr: Expr, env: Env): Value
-
   // Parsers
   abstract class ParserObject[T](parser: Parser[T]) {
     def apply(str: String): T = parseAll(parser, str).getOrElse(error(s"bad syntax: $str"))
@@ -64,24 +49,29 @@ trait Midterm extends Homework with RegexParsers {
   private def wrapR[T](e: Parser[T]): Parser[T] = "(" ~> e <~ ")"
   private def wrapC[T](e: Parser[T]): Parser[T] = "{" ~> e <~ "}"
   private def wrapS[T](e: Parser[T]): Parser[T] = "[" ~> e <~ "]"
-  private lazy val keywords = Set("true", "false", "val", "def", "if", "else")
+  private lazy val keywords = Set("true", "false", "val", "new", "def", "if", "else", "class")
   private lazy val n: Parser[Int] = "-?[0-9]+".r ^^ (_.toInt)
   private lazy val i: Parser[Int] = "_[1-9][0-9]*".r ^^ (_.tail.toInt)
   private lazy val b: Parser[Boolean] =
     "true" ^^^ true | "false" ^^^ false
   private lazy val x: Parser[String] =
     "[a-zA-Z_][a-zA-Z0-9_]*".r.withFilter(!keywords(_))
+
   private lazy val e: Parser[Expr] =
     (x <~ "=>") ~ e ^^ { case p ~ b => Fun(List(p), b) } |
     ((wrapR(repsep(x, ",")) <~ "=>") ~ e).withFilter{
       case ps ~ _ => ps.distinct.length == ps.length
     } ^^ { case ps ~ b => Fun(ps, b) } | e0
+
   private lazy val e0: Parser[Expr] =
     rep1sep(e1, "::") ^^ (_.reduceRight(ConsE))
+
   private lazy val e1: Parser[Expr] =
     rep1sep(e2, "||") ^^ (_.reduceLeft(Or))
+
   private lazy val e2: Parser[Expr] =
     rep1sep(e3, "&&") ^^ (_.reduceLeft(And))
+
   private lazy val e3: Parser[Expr] =
     e4 ~ rep(("==" | "!=" | "<=" | "<" | ">=" | ">") ~ e4) ^^ {
       case e ~ es => es.foldLeft(e){
@@ -93,11 +83,13 @@ trait Midterm extends Homework with RegexParsers {
         case (l,   _  ~ r) => Gte(l, r)
       }
     }
+
   private lazy val e4: Parser[Expr] =
     e5 ~ rep(("+" | "-") ~ e5) ^^ { case e ~ es => es.foldLeft(e){
       case (l, "+" ~ r) => Add(l, r)
       case (l,  _  ~ r) => Sub(l, r)
     }}
+
   private lazy val e5: Parser[Expr] =
     e6 ~ rep(("*" | "/" | "%") ~ e6) ^^ { case e ~ es => es.foldLeft(e){
       case (l, "*" ~ r) => Mul(l, r)
@@ -110,17 +102,13 @@ trait Midterm extends Homework with RegexParsers {
 
   private lazy val e7: Parser[Expr] =
     e8 ~ rep(
-      wrapR(repsep(e, ",")) ^^ AppP |
-      "." ~> x ^^ ObjGetP |
-      ("." ~> x <~ "=") ~ e ~ (";" ~> e) ^^ ObjSetP
+      wrapR(repsep(e, ",")) ^^ AppP
     ) ^^ { case e ~ es => es.foldLeft(e){
       case (f, AppP(as)) => App(f, as)
-      case (obj, ObjGetP(name)) => ObjGet(obj, name)
-      case (obj, ObjSetP(name, value, expr)) => ObjSet(obj, name, value, expr)
     }}
 
   private lazy val e8: Parser[Expr] =
-    x ^^ Id | n ^^ IntE | b ^^ BooleanE | "{}" ^^^ ObjE |
+    x ^^ Id | n ^^ IntE | b ^^ BooleanE |
     ("if" ~> wrapR(e)) ~ e ~ ("else" ~> e) ^^ { case c ~ t ~ f => If(c, t, f) } |
     ("val" ~> x <~ "=") ~ e ~ (";" ~> e) ^^ { case x ~ e ~ b => Val(x, e, b) } |
     (("val" ~> wrapR((x <~ ",") ~ rep1sep(x, ",")) <~ "=") ~ e ~ (";" ~> e)).withFilter{
@@ -132,6 +120,7 @@ trait Midterm extends Homework with RegexParsers {
       val names = ds.map(_.n)
       names.distinct.length == names.length
     } ^^ { case ds ~ b => RecFuns(ds, b) } |
+    eObjProto |
     wrapC(e)
 
   private lazy val d: Parser[FunDef] =
@@ -141,10 +130,7 @@ trait Midterm extends Homework with RegexParsers {
       case n ~ ps ~ b => FunDef(n, ps, b)
     }
 
-  private sealed trait E3P
-  private case class AppP(as: List[Expr]) extends E3P
-  private case class ObjGetP(name: string) extends E3P
-  private case class ObjSetP(name: string, value: Expr, expr: Expr) extends E6P
+  private case class AppP(as: List[Expr])
 
   // Desugaring
   private val T = BooleanE(true)
@@ -168,4 +154,43 @@ trait Midterm extends Homework with RegexParsers {
     id += 1
     s"$$x$id"
   }
+
+  // ================== Midterm Code ==================
+  private lazy val eObjProto = eObj | eProto
+
+  // Object
+  private lazy val eObj: Parser[Expr] =
+    "{}" ^^^ ObjE |
+    e ~ ("." ~> x <~ "=") ~ e ~ (";" ~> e) ^^ ObjSet |
+    (e ~> "." <~ x) ^^ ObjGet
+
+  type FiberKey = String
+  type FiberValue = Value
+  type FiberObject = Map[FiberKey, FiberValue]
+  type Addr = Int
+  type ObjStore = Map[Addr, FiberObject]
+  case object ObjE extends Expr
+  case class ObjGet(name: string) extends Expr // object get value
+  case class ObjSet(name: string, value: Expr, expr: Expr) extends Expr // object set value
+  case class ObjV(addr: Addr) extends Value {
+    override def toString(_): String = "<object>"
+  }
+
+  // Prototype
+  private lazy val eProto: Parser[Expr] =
+    wrapR("new" ~> e) ^^ ProtoNew |
+    "class" ~ wrapS(e ~> "," <~ e) ^^ ProtoClass |
+    (e ~> "->" <~ e) ^^ ProtoMethod
+
+  case class ProtoNew(obj: Expr) extends Expr // create object from class
+  case class ProtoClass(const: Expr, proto: Expr) extends Expr // create class
+  case class ProtoMethod(obj: Expr, name: string) extends Expr // get class method
+  case class ClassV(constructor: Value, prototype: Value) extends Value {
+    override def toString(_): String = "<class>"
+  }
+
+  // Interpreter
+  def run(str: String): String = interp(Expr(str)).toString
+  def interp(expr: Expr): Value = interp(expr, Map.empty, Map.empty)
+  def interp(expr: Expr, env: Env, store: ObjStore): Value
 }

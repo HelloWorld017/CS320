@@ -26,37 +26,6 @@ package object midterm extends Midterm {
       case _ => error(s"TypeError: evaluating condition for illegal type: $c")
     }
 
-  private def interpProj(t: Expr, i: Int, env: Env): Value =
-    interp(t, env) match {
-      case TupleV(vs) => vs.lift(i - 1) match {
-        case Some(v) => v
-        case None => error(s"RangeError: projecting on non existent index: $i")
-      }
-
-      case _ => error(s"TypeError: projecting on illegal type: $t")
-    }
-
-  private def interpCons(h: Expr, t: Expr, env: Env): Value =
-    interp(t, env) match {
-      case NilV => ConsV(interp(h, env), NilV)
-      case v: ConsV => ConsV(interp(h, env), v)
-      case _ => error(s"TypeError: making a list with non-list $t")
-    }
-
-  private def interpListOp(
-    listOp: (Value, Value) => Value,
-    nilOp: () => Value = () => error(s"TypeError: making a list operation on nil type")
-  ): (Expr, Env) => Value =
-    (l, env) => interp(l, env) match {
-      case ConsV(h, t) => listOp(h, t)
-      case NilV => nilOp()
-      case _ => error(s"TypeError: making a list operation on illegal type: $l")
-    }
-
-  private val interpEmpty = interpListOp((_, _) => BooleanV(false), () => BooleanV(true))
-  private val interpHead = interpListOp((h, _) => h)
-  private val interpTail = interpListOp((_, t) => t)
-
   private def interpVal(x: String, e: Expr, b: Expr, env: Env): Value =
     interp(b, env + (x -> interp(e, env)))
 
@@ -91,25 +60,13 @@ package object midterm extends Midterm {
       case _ => error(s"TypeError: calling for illegal type: $f")
     }
 
-  private def interpTest(e: Expr, t: Type, env: Env): Value =
-    interp(e, env) match {
-      case IntV(_) => BooleanV(t == IntT)
-      case BooleanV(_) => BooleanV(t == BooleanT)
-      case TupleV(_) => BooleanV(t == TupleT)
-      case ConsV(_, _) | NilV => BooleanV(t == ListT)
-      case CloV(_, _, _) => BooleanV(t == FunctionT)
-    }
-
-  def interp(e: Expr, env: Env): Value = e match {
+  def interp(e: Expr, state: InterpState): Value = e match {
     // Variables
     case Id(name) => interpId(name, env)
 
     // Primitives
     case IntE(n) => IntV(n)
     case BooleanE(b) => BooleanV(b)
-    case TupleE(es: List[Expr]) => TupleV(es.map(v => interp(v, env)))
-    case NilE => NilV
-    case ConsE(h, t) => interpCons(h, t, env)
     case Fun(ps, b) => CloV(ps, b, env)
     case RecFuns(ds: List[FunDef], b: Expr) => interpRecFuns(ds, b, env)
 
@@ -121,13 +78,10 @@ package object midterm extends Midterm {
     case Eq(l, r) => interpIntEq(l, r, env)
     case Lt(l, r) => interpIntLt(l, r, env)
     case If(c, t, f) => interpIf(c, t, f, env)
-    case Proj(t, i) => interpProj(t, i, env)
-    case Empty(l) => interpEmpty(l, env)
-    case Head(l) => interpHead(l, env)
-    case Tail(l) => interpTail(l, env)
     case Val(x, e, b) => interpVal(x, e, b, env)
     case App(f, as) => interpApp(f, as, env)
-    case Test(e, t) => interpTest(e, t, env)
+
+    // Objects
   }
 
   def tests: Unit = {
@@ -153,30 +107,6 @@ package object midterm extends Midterm {
     // test-lt
     test(run("1 < 3 - 2"), "false")
 
-    // test-tuple1
-    test(run("(1, 2 + 3, true)"), "(1, 5, true)")
-    // test-tuple2
-    test(run("((42, 3 * 2), false)"), "((42, 6), false)")
-    // test-proj1
-    test(run("(1, 2 + 3, true)._1"), "1")
-    // test-proj2
-    test(run("((42, 3 * 2), false)._1._2"), "6")
-
-    // test-nil
-    test(run("Nil"), "Nil")
-    // test-cons
-    test(run("1 :: 1 + 1 :: Nil"), "(1 :: (2 :: Nil))")
-    // test-isempty1
-    test(run("Nil.isEmpty"), "true")
-    // test-isempty2
-    test(run("(1 :: Nil).isEmpty"), "false")
-    // test-head
-    test(run("(1 :: Nil).head"), "1")
-    // test-tail
-    test(run("(1 :: Nil).tail"), "Nil")
-    // test-tail-head
-    test(run("(1 :: 2 :: Nil).tail.head"), "2")
-
     // test-local1
     test(run("""
       val x = 1 + 2;
@@ -200,15 +130,6 @@ package object midterm extends Midterm {
     // test-app3
     test(run("((x, y) => x + y)(1, 2)"), "3")
 
-    // test-type1
-    test(run("1.isInstanceOf[Int]"), "true")
-    // test-type2
-    test(run("1.isInstanceOf[Boolean]"), "false")
-    // test-type3
-    test(run("(1 :: Nil).isInstanceOf[List]"), "true")
-    // test-type4
-    test(run("(x => x + x).isInstanceOf[Function]"), "true")
-
     // test-if
     test(run("if (true) 1 else 2"), "1")
     // test-not
@@ -225,8 +146,6 @@ package object midterm extends Midterm {
     test(run("1 > 1"), "false")
     // test-gte
     test(run("1 >= 1"), "true")
-    // test-nonempty
-    test(run("Nil.nonEmpty"), "false")
 
     // test-rec1
     test(run("""
@@ -239,27 +158,64 @@ package object midterm extends Midterm {
       f(10)
     """), "55")
 
-    test(run("""
-      def reduce(list, iterator, initial) =
-        if(!list.isInstanceOf[List] || !iterator.isInstanceOf[Function])
-          false
-        else
-          val next = iterator(initial, list.head);
-          if(list.tail.isEmpty)
-            next
-          else
-            reduce(list.tail, iterator, next);
+    // ================== Midterm Code ==================
+    // Parser
+    test(
+      Expr(
+        """
+        val Constructor = (this) => this;
+        val Class = class[Constructor, {}];
+        val obj = (new Class)();
+        obj.x = (x) => x;
+        obj->x()
+        """
+      ),
+      Val(
+        "Constructor",
+        Fun("this" :: Nil, Id(this)),
 
-      def factorial(n) =
-        if(n <= 1)
-          1
-        else
-          n * factorial(n - 1);
+        Val(
+          "Class",
+          ProtoClass(Id("Constructor"), ObjE),
 
-      def wrapFactorial(prev, n) =
-        (prev, factorial(n));
+          Val(
+            "obj",
+            App(
+              ProtoNew(Id("Class")),
+              Nil
+            ),
 
-      reduce(1 :: 2 :: 3 :: 4 :: 5 :: Nil, wrapFactorial, Nil)
-    """), "(((((Nil, 1), 2), 6), 24), 120)")
+            ObjSet(
+              Id("obj"),
+              "x",
+              Fun("x" :: Nil, Id(x)),
+              App(ProtoMethod(Id("obj"), "x"), Nil)
+            )
+          )
+        )
+      )
+    )
+
+    test(run(
+      """
+      val AnimalPrototype = {extends Object};
+      AnimalPrototype.age = 0;
+      AnimalPrototype.newYear = (this) => this.age = this.age + 1; this.age;
+
+      val AnimalConstructor = (this, age) =>
+        this.age = age;
+        this;
+
+      val Animal = class[AnimalConstructor, AnimalPrototype];
+
+      val ImmortalAnimalPrototype = {extends AnimalPrototype};
+      ImmortalAnimalPrototype.newYear = (this) => this.age;
+
+      val myAnimal = (new Animal)(15);
+      val immortalJellyfish = (new ImmortalAnimal)(0);
+
+      myAnimal->newYear() + immortalJellyfish->newYear()
+      """
+    ), 16)
   }
 }
