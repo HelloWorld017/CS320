@@ -151,27 +151,34 @@ trait Midterm extends Homework with RegexParsers {
   }
 
   // ================== Midterm Code ==================
-  private lazy val eObjProto: Parser[Expr] = eObj | eObjProtoAtom
-  private lazy val eObjProtoAtom = eObjAtom | eProtoAtom
+  // Parsers
+  private lazy val eObjProto: Parser[Expr] =
+    (eObjGet <~ "=") ~ eExpr ~ (";" ~> eExpr) ^^ {
+      case ObjGet(obj, key) ~ value ~ body => ObjSet(obj, key, value, body)
+    } |
+    eObjProtoAtom
 
-  // Object
-  private lazy val eObj: Parser[Expr] =
-    eObjProtoAtom ~ ("." ~> x <~ "=") ~ eExpr ~ (";" ~> eExpr) ^^ {
-      case obj ~ key ~ value ~ body => ObjSet(obj, key, value, body)
+  private lazy val eObjGet: Parser[Expr] =
+    eObjProtoAtom2 ~ rep1(("." | "->") ~ x) ^^ {
+      case obj ~ keys => keys.foldLeft(obj) {
+        case (targetObj, "." ~ key) => ObjGet(targetObj, key)
+        case (targetObj,  _  ~ key) => ProtoMethod(targetObj, key)
+      }
     }
 
-  private lazy val eObjAtom: Parser[Expr] =
-    (eAtom | eObjAtom2) ~ rep1("." ~> x) ^^ {
-      case obj ~ keys => keys.foldLeft(obj){
-        case (prev, curr) => ObjGet(prev, curr)
-      }
-    } |
-    eObjAtom2
+  private lazy val eObjProtoAtom: Parser[Expr] = eObjGet | eObjProtoAtom2
 
-  private lazy val eObjAtom2: Parser[Expr] =
+  private lazy val eObjProtoAtom2: Parser[Expr] =
     "{}" ^^^ ObjE |
+    wrapC("extends" ~> wrapS(eExpr)) ^^ {
+      case baseObj => ProtoE(baseObj)
+    } |
+    "class" ~> wrapS((eExpr <~ ",") ~ eExpr) ^^ {
+      case const ~ proto => ProtoClass(const, proto)
+    } |
     eAtom
 
+  // Object
   type FiberKey = String
   type FiberValue = Value
   type FiberObject = Map[FiberKey, FiberValue]
@@ -185,19 +192,6 @@ trait Midterm extends Homework with RegexParsers {
   }
 
   // Prototype
-  private lazy val eProtoAtom: Parser[Expr] =
-    wrapC("extends" ~> wrapS(eExpr)) ^^ {
-      case baseObj => ProtoE(baseObj)
-    } |
-    "class" ~> wrapS((eExpr <~ ",") ~ eExpr) ^^ {
-      case const ~ proto => ProtoClass(const, proto)
-    } |
-    eObjAtom ~ rep1("->" ~> x) ^^ {
-      case obj ~ keys => keys.foldLeft(obj){
-        case (prev, curr) => ProtoMethod(prev, curr)
-      }
-    }
-
   case class ProtoE(baseObj: Expr) extends Expr // create object from prototype object
   case class ProtoClass(const: Expr, proto: Expr) extends Expr // create class
   case class ProtoMethod(obj: Expr, key: String) extends Expr // get class method
