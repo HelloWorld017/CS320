@@ -33,6 +33,7 @@ trait Midterm extends Homework with RegexParsers {
       case IntV(n) => n.toString
       case BooleanV(b) => b.toString
       case CloV(_, _, _) => "<function>"
+      case _ => "unknown"
     }
   }
   case class IntV(n: Int) extends Value
@@ -49,7 +50,7 @@ trait Midterm extends Homework with RegexParsers {
   private def wrapR[T](e: Parser[T]): Parser[T] = "(" ~> e <~ ")"
   private def wrapC[T](e: Parser[T]): Parser[T] = "{" ~> e <~ "}"
   private def wrapS[T](e: Parser[T]): Parser[T] = "[" ~> e <~ "]"
-  private lazy val keywords = Set("true", "false", "val", "new", "def", "if", "else", "class")
+  private lazy val keywords = Set("true", "false", "val", "new", "def", "if", "else", "class", "extends")
   private lazy val n: Parser[Int] = "-?[0-9]+".r ^^ (_.toInt)
   private lazy val i: Parser[Int] = "_[1-9][0-9]*".r ^^ (_.tail.toInt)
   private lazy val b: Parser[Boolean] =
@@ -61,10 +62,7 @@ trait Midterm extends Homework with RegexParsers {
     (x <~ "=>") ~ e ^^ { case p ~ b => Fun(List(p), b) } |
     ((wrapR(repsep(x, ",")) <~ "=>") ~ e).withFilter{
       case ps ~ _ => ps.distinct.length == ps.length
-    } ^^ { case ps ~ b => Fun(ps, b) } | e0
-
-  private lazy val e0: Parser[Expr] =
-    rep1sep(e1, "::") ^^ (_.reduceRight(ConsE))
+    } ^^ { case ps ~ b => Fun(ps, b) } | e1
 
   private lazy val e1: Parser[Expr] =
     rep1sep(e2, "||") ^^ (_.reduceLeft(Or))
@@ -111,16 +109,11 @@ trait Midterm extends Homework with RegexParsers {
     x ^^ Id | n ^^ IntE | b ^^ BooleanE |
     ("if" ~> wrapR(e)) ~ e ~ ("else" ~> e) ^^ { case c ~ t ~ f => If(c, t, f) } |
     ("val" ~> x <~ "=") ~ e ~ (";" ~> e) ^^ { case x ~ e ~ b => Val(x, e, b) } |
-    (("val" ~> wrapR((x <~ ",") ~ rep1sep(x, ",")) <~ "=") ~ e ~ (";" ~> e)).withFilter{
-      case x ~ xs ~ e ~ b =>
-        val xs1 = x :: xs
-        xs1.distinct.length == xs1.length
-    } |
     (rep1(d) ~ e).withFilter{ case ds ~ _ =>
       val names = ds.map(_.n)
       names.distinct.length == names.length
     } ^^ { case ds ~ b => RecFuns(ds, b) } |
-    eObjProto |
+    //eObjProto |
     wrapC(e)
 
   private lazy val d: Parser[FunDef] =
@@ -156,13 +149,17 @@ trait Midterm extends Homework with RegexParsers {
   }
 
   // ================== Midterm Code ==================
-  private lazy val eObjProto = eObj | eProto
+  private lazy val eObjProto: Parser[Expr] = eObj | eProto
 
   // Object
   private lazy val eObj: Parser[Expr] =
     "{}" ^^^ ObjE |
-    e ~ ("." ~> x <~ "=") ~ e ~ (";" ~> e) ^^ ObjSet |
-    (e ~> "." <~ x) ^^ ObjGet
+    e ~ (("." ~> x) <~ "=") ~ e ~ (";" ~> e) ^^ {
+      case obj ~ key ~ value ~ body => ObjSet(obj, key, value, body)
+    } |
+    e ~ ("." ~> x) ^^ {
+      case obj ~ key => ObjGet(obj, key)
+    }
 
   type FiberKey = String
   type FiberValue = Value
@@ -170,24 +167,27 @@ trait Midterm extends Homework with RegexParsers {
   type Addr = Int
   type ObjStore = Map[Addr, FiberObject]
   case object ObjE extends Expr
-  case class ObjGet(name: string) extends Expr // object get value
-  case class ObjSet(name: string, value: Expr, expr: Expr) extends Expr // object set value
+  case class ObjGet(obj: Expr, key: String) extends Expr // object get value
+  case class ObjSet(obj: Expr, key: String, value: Expr, body: Expr) extends Expr // object set value
   case class ObjV(addr: Addr) extends Value {
-    override def toString(_): String = "<object>"
+    override def toString: String = "<object>"
   }
 
   // Prototype
   private lazy val eProto: Parser[Expr] =
-    wrapR("new" ~> e) ^^ ProtoNew |
-    "class" ~ wrapS(e ~> "," <~ e) ^^ ProtoClass |
-    (e ~> "->" <~ e) ^^ ProtoMethod
+    wrapC("extends" ~> e) ^^ {
+      case baseObj => ProtoE(baseObj)
+    } |
+    "class" ~> wrapS((e <~ ",") ~ e) ^^ {
+      case const ~ proto => ProtoClass(const, proto)
+    } |
+    (e <~ "->") ~ x ^^ {
+      case obj ~ key => ProtoMethod(obj, key)
+    }
 
-  case class ProtoNew(obj: Expr) extends Expr // create object from class
+  case class ProtoE(baseObj: Expr) extends Expr // create object from prototype object
   case class ProtoClass(const: Expr, proto: Expr) extends Expr // create class
-  case class ProtoMethod(obj: Expr, name: string) extends Expr // get class method
-  case class ClassV(constructor: Value, prototype: Value) extends Value {
-    override def toString(_): String = "<class>"
-  }
+  case class ProtoMethod(obj: Expr, key: String) extends Expr // get class method
 
   // Interpreter
   def run(str: String): String = interp(Expr(str)).toString

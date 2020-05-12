@@ -1,14 +1,14 @@
 package cs320
 
 package object midterm extends Midterm {
-  private def interpId(name: String, env: Env): Value =
+  private def interpId(name: String, env: Env, sto: ObjStore): Value =
     env.get(name) match {
       case Some(v) => v
       case None => error(s"ReferenceError: not defined: $name")
     }
 
-  private def interpIntOp(op: (Int, Int) => Value): (Expr, Expr, Env) => Value =
-    (l, r, env) => (interp(l, env), interp(r, env)) match {
+  private def interpIntOp(op: (Int, Int) => Value): (Expr, Expr, Env, ObjStore) => Value =
+    (l, r, env, sto) => (interp(l, env, sto), interp(r, env, sto)) match {
       case (IntV(x), IntV(y)) => op(x, y)
       case (x, y) => error(s"TypeError: making a integer operation on at least one illegal type: $x, $y")
     }
@@ -20,16 +20,16 @@ package object midterm extends Midterm {
   private val interpIntEq = interpIntOp((x, y) => BooleanV(x == y))
   private val interpIntLt = interpIntOp((x, y) => BooleanV(x < y))
 
-  private def interpIf(c: Expr, t: Expr, f: Expr, env: Env): Value =
-    interp(c, env) match {
-      case BooleanV(condition) => if(condition) interp(t, env) else interp(f, env)
+  private def interpIf(c: Expr, t: Expr, f: Expr, env: Env, sto: ObjStore): Value =
+    interp(c, env, sto) match {
+      case BooleanV(condition) => if(condition) interp(t, env, sto) else interp(f, env, sto)
       case _ => error(s"TypeError: evaluating condition for illegal type: $c")
     }
 
-  private def interpVal(x: String, e: Expr, b: Expr, env: Env): Value =
-    interp(b, env + (x -> interp(e, env)))
+  private def interpVal(x: String, e: Expr, b: Expr, env: Env, sto: ObjStore): Value =
+    interp(b, env + (x -> interp(e, env, sto)), sto)
 
-  private def interpRecFuns(ds: List[FunDef], b: Expr, env: Env): Value = {
+  private def interpRecFuns(ds: List[FunDef], b: Expr, env: Env, sto: ObjStore): Value = {
     val funs = ds.foldLeft(Map[String, CloV]())((funs, fdef) => {
       val fun = CloV(fdef.ps, fdef.b, env)
       funs + (fdef.n -> fun)
@@ -43,11 +43,11 @@ package object midterm extends Midterm {
       }
     })
 
-    interp(b, nenv)
+    interp(b, nenv, sto)
   }
 
-  private def interpApp(f: Expr, as: List[Expr], env: Env): Value =
-    interp(f, env) match {
+  private def interpApp(f: Expr, as: List[Expr], env: Env, sto: ObjStore): Value =
+    interp(f, env, sto) match {
       case CloV(ps, b, fenv) =>
         val paramLen = ps.length
         val argsLen = as.length
@@ -55,33 +55,34 @@ package object midterm extends Midterm {
         if(paramLen != argsLen)
           error(s"TypeError: function takes $paramLen parameters, but $argsLen arguments were given")
         else
-          interp(b, fenv ++ ps.zip(as.map(v => interp(v, env))))
+          interp(b, fenv ++ ps.zip(as.map(v => interp(v, env, sto))), sto)
 
       case _ => error(s"TypeError: calling for illegal type: $f")
     }
 
-  def interp(e: Expr, state: InterpState): Value = e match {
+  def interp(e: Expr, env: Env, sto: ObjStore): Value = e match {
     // Variables
-    case Id(name) => interpId(name, env)
+    case Id(name) => interpId(name, env, sto)
 
     // Primitives
     case IntE(n) => IntV(n)
     case BooleanE(b) => BooleanV(b)
     case Fun(ps, b) => CloV(ps, b, env)
-    case RecFuns(ds: List[FunDef], b: Expr) => interpRecFuns(ds, b, env)
+    case RecFuns(ds: List[FunDef], b: Expr) => interpRecFuns(ds, b, env, sto)
 
     // Operations
-    case Add(l, r) => interpIntAdd(l, r, env)
-    case Mul(l, r) => interpIntMul(l, r, env)
-    case Div(l, r) => interpIntDiv(l, r, env)
-    case Mod(l, r) => interpIntMod(l, r, env)
-    case Eq(l, r) => interpIntEq(l, r, env)
-    case Lt(l, r) => interpIntLt(l, r, env)
-    case If(c, t, f) => interpIf(c, t, f, env)
-    case Val(x, e, b) => interpVal(x, e, b, env)
-    case App(f, as) => interpApp(f, as, env)
+    case Add(l, r) => interpIntAdd(l, r, env, sto)
+    case Mul(l, r) => interpIntMul(l, r, env, sto)
+    case Div(l, r) => interpIntDiv(l, r, env, sto)
+    case Mod(l, r) => interpIntMod(l, r, env, sto)
+    case Eq(l, r) => interpIntEq(l, r, env, sto)
+    case Lt(l, r) => interpIntLt(l, r, env, sto)
+    case If(c, t, f) => interpIf(c, t, f, env, sto)
+    case Val(x, e, b) => interpVal(x, e, b, env, sto)
+    case App(f, as) => interpApp(f, as, env, sto)
 
     // Objects
+    case _ => IntV(0)
   }
 
   def tests: Unit = {
@@ -113,13 +114,6 @@ package object midterm extends Midterm {
       val y = x * 4 + 1;
       y / (x - 1)
     """), "6")
-    // test-local2
-    test(run("""
-      val (x, y) = (1 + 2, 3 + 4);
-      val z = x * y;
-      val (a, b, c) = (z, z + z, z + z + z);
-      c - b
-    """), "21")
 
     // test-fun
     test(run("x => x + x"), "<function>")
@@ -159,41 +153,37 @@ package object midterm extends Midterm {
     """), "55")
 
     // ================== Midterm Code ==================
-    // Parser
+    // ObjParser
     test(
       Expr(
         """
-        val Constructor = (this) => this;
-        val Class = class[Constructor, {}];
-        val obj = (new Class)();
-        obj.x = (x) => x;
-        obj->x()
+        val obj = {};
+        obj.x = 1;
+        obj.x
         """
       ),
       Val(
-        "Constructor",
-        Fun("this" :: Nil, Id(this)),
-
-        Val(
-          "Class",
-          ProtoClass(Id("Constructor"), ObjE),
-
-          Val(
-            "obj",
-            App(
-              ProtoNew(Id("Class")),
-              Nil
-            ),
-
-            ObjSet(
-              Id("obj"),
-              "x",
-              Fun("x" :: Nil, Id(x)),
-              App(ProtoMethod(Id("obj"), "x"), Nil)
-            )
-          )
+        "obj",
+        ObjE,
+        ObjSet(
+          Id("obj"),
+          "x",
+          IntE(1),
+          ObjGet(Id("obj"), "x")
         )
       )
+    )
+
+    // ProtoParser
+    test(
+      Expr("class[(this) => this, {extends {}}]()->x()"),
+      App(ProtoMethod(
+        App(ProtoClass(
+          Fun("this" :: Nil, Id("this")),
+          ProtoE(ObjE)
+        ), Nil),
+        "x"
+      ), Nil)
     )
 
     test(run(
@@ -211,8 +201,8 @@ package object midterm extends Midterm {
       val ImmortalAnimalPrototype = {extends AnimalPrototype};
       ImmortalAnimalPrototype.newYear = (this) => this.age;
 
-      val myAnimal = (new Animal)(15);
-      val immortalJellyfish = (new ImmortalAnimal)(0);
+      val myAnimal = Animal(15);
+      val immortalJellyfish = ImmortalAnimal(0);
 
       myAnimal->newYear() + immortalJellyfish->newYear()
       """
