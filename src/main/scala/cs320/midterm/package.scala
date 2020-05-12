@@ -1,16 +1,23 @@
 package cs320
 
 package object midterm extends Midterm {
-  private def interpId(name: String, env: Env, sto: ObjStore): Value =
+  private def malloc(sto: ObjStore): Addr = (-1 :: sto.keys.toList).max + 1
+
+  private def interpId(name: String, env: Env, sto: ObjStore): (Value, ObjStore) =
     env.get(name) match {
-      case Some(v) => v
+      case Some(v) => (v, sto)
       case None => error(s"ReferenceError: not defined: $name")
     }
 
-  private def interpIntOp(op: (Int, Int) => Value): (Expr, Expr, Env, ObjStore) => Value =
-    (l, r, env, sto) => (interp(l, env, sto), interp(r, env, sto)) match {
-      case (IntV(x), IntV(y)) => op(x, y)
-      case (x, y) => error(s"TypeError: making a integer operation on at least one illegal type: $x, $y")
+  private def interpIntOp(op: (Int, Int) => Value): (Expr, Expr, Env, ObjStore) => (Value, ObjStore) =
+    (l, r, env, sto) => {
+      val (lv, ls) = interp(l, env, sto)
+      val (rv, rs) = interp(r, env, ls)
+
+      (lv, rv) match {
+        case (IntV(x), IntV(y)) => (op(x, y), rs)
+        case (x, y) => error(s"TypeError: making a integer operation on at least one illegal type: $x, $y")
+      }
     }
 
   private val interpIntAdd = interpIntOp((x, y) => IntV(x + y))
@@ -20,16 +27,23 @@ package object midterm extends Midterm {
   private val interpIntEq = interpIntOp((x, y) => BooleanV(x == y))
   private val interpIntLt = interpIntOp((x, y) => BooleanV(x < y))
 
-  private def interpIf(c: Expr, t: Expr, f: Expr, env: Env, sto: ObjStore): Value =
-    interp(c, env, sto) match {
-      case BooleanV(condition) => if(condition) interp(t, env, sto) else interp(f, env, sto)
+  private def interpIf(c: Expr, t: Expr, f: Expr, env: Env, sto: ObjStore): (Value, ObjStore) = {
+    val (cv, cs) = interp(c, env, sto)
+
+    cv match {
+      case BooleanV(condition) =>
+        if(condition) interp(t, env, cs) else interp(f, env, cs)
+
       case _ => error(s"TypeError: evaluating condition for illegal type: $c")
     }
+  }
 
-  private def interpVal(x: String, e: Expr, b: Expr, env: Env, sto: ObjStore): Value =
-    interp(b, env + (x -> interp(e, env, sto)), sto)
+  private def interpVal(x: String, e: Expr, b: Expr, env: Env, sto: ObjStore): (Value, ObjStore) = {
+    val (value, newStore) = interp(e, env, sto)
+    interp(b, env + (x -> value), newStore)
+  }
 
-  private def interpRecFuns(ds: List[FunDef], b: Expr, env: Env, sto: ObjStore): Value = {
+  private def interpRecFuns(ds: List[FunDef], b: Expr, env: Env, sto: ObjStore): (Value, ObjStore) = {
     val funs = ds.foldLeft(Map[String, CloV]())((funs, fdef) => {
       val fun = CloV(fdef.ps, fdef.b, env)
       funs + (fdef.n -> fun)
@@ -46,28 +60,90 @@ package object midterm extends Midterm {
     interp(b, nenv, sto)
   }
 
-  private def interpApp(f: Expr, as: List[Expr], env: Env, sto: ObjStore): Value =
-    interp(f, env, sto) match {
+  private def interpApp(f: Expr, as: List[Expr], env: Env, sto: ObjStore): (Value, ObjStore) = {
+    val (fv, fs) = interp(f, env, sto)
+
+    fv match {
       case CloV(ps, b, fenv) =>
         val paramLen = ps.length
         val argsLen = as.length
 
         if(paramLen != argsLen)
           error(s"TypeError: function takes $paramLen parameters, but $argsLen arguments were given")
-        else
-          interp(b, fenv ++ ps.zip(as.map(v => interp(v, env, sto))), sto)
+        else {
+          val (argList, argStore) = as.foldLeft((List[Value](), fs))(
+            (argState: (List[Value], ObjStore), currArg: Expr) => {
+              val (argList, store) = argState
+              val (argv, args) = interp(currArg, env, store)
+              (argv :: argList, args)
+            }
+          )
+
+          interp(b, fenv ++ ps.zip(argList), argStore)
+        }
 
       case _ => error(s"TypeError: calling for illegal type: $f")
     }
+  }
 
-  def interp(e: Expr, env: Env, sto: ObjStore): Value = e match {
+  private def interpObjV(env: Env, sto: ObjStore): (Value, ObjStore) = {
+    val addr = malloc(sto)
+    (ObjV(addr), sto + {addr -> Map[FiberKey, FiberValue]()})
+  }
+
+  private def interpObjGet(obj: Expr, key: String, env: Env, sto: ObjStore): (Value, ObjStore) = {
+    val (ov, os) = interp(obj, env, sto)
+
+    ov match {
+      case ObjV(addr) => sto.get(addr) match {
+          case Some(objValue) => objValue.get(key) match {
+              case Some(value) => (value, os)
+              case None => error(s"KeyError: the object has no such key: $key")
+            }
+
+          case None => error(s"UnknownError: the object variable points non-existing object")
+        }
+
+      case _ => error(s"TypeError: Cannot read property '$key' of illegal type: $obj")
+    }
+  }
+
+  private def interpObjSet(
+    obj: Expr, key: String, value: Expr, body: Expr, env: Env, sto: ObjStore
+  ): (Value, ObjStore) = {
+    val (ov, os) = interp(obj, env, sto)
+
+    ov match {
+      case ObjV(addr) =>
+        sto.get(addr) match {
+          case Some(objValue) => {
+            val (vv, vs) = interp(value, env, os)
+            val newStore = vs + (addr -> (objValue + (key -> vv)))
+
+            interp(body, env, newStore)
+          }
+          case None => error(s"UnknownError: the object variable points non-existing object")
+        }
+
+      case _ => error(s"TypeError: Cannot read property '$key' of illegal type: $obj")
+    }
+  }
+
+  private def interpProto(baseObj: Expr, env: Env, sto: ObjStore): (Value, ObjStore) = {
+    val (bov, bos) = interp(baseObj, env, sto)
+
+    val addr = malloc(sto)
+    (ObjV(addr), sto + {addr -> {"$Prototype" -> bov}})
+  }
+
+  def interp(e: Expr, env: Env, sto: ObjStore): (Value, ObjStore) = e match {
     // Variables
     case Id(name) => interpId(name, env, sto)
 
     // Primitives
-    case IntE(n) => IntV(n)
-    case BooleanE(b) => BooleanV(b)
-    case Fun(ps, b) => CloV(ps, b, env)
+    case IntE(n) => (IntV(n), sto)
+    case BooleanE(b) => (BooleanV(b), sto)
+    case Fun(ps, b) => (CloV(ps, b, env), sto)
     case RecFuns(ds: List[FunDef], b: Expr) => interpRecFuns(ds, b, env, sto)
 
     // Operations
@@ -82,7 +158,14 @@ package object midterm extends Midterm {
     case App(f, as) => interpApp(f, as, env, sto)
 
     // Objects
-    case _ => IntV(0)
+    case ObjE => interpObjV(env, sto)
+    case ObjGet(obj, key) => interpObjGet(obj, key, env, sto)
+    case ObjSet(obj, key, value, body) => interpObjSet(obj, key, value, body, env, sto)
+
+    // Prototypes
+    case ProtoE(baseObj) => interpProto(baseObj, env, sto)
+    case ProtoClass(const, proto) => interpProtoClass(const, proto, env, sto)
+    case ProtoMethod(obj, key) => interpProtoMethod(obj, key, env, sto)
   }
 
   def tests: Unit = {
@@ -196,7 +279,7 @@ package object midterm extends Midterm {
 
     // ProtoParser
     test(
-      Expr("class [(this) => this, {}]()->x()"),
+      Expr("(class [(this) => this, {extends[{}]}]())->x()"),
       App(ProtoMethod(
         App(ProtoClass(
           Fun("this" :: Nil, Id("this")),
