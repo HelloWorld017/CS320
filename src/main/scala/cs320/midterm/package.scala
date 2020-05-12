@@ -154,6 +154,26 @@ package object midterm extends Midterm {
 
     // ================== Midterm Code ==================
     // ObjParser
+    // test-objparser-obje
+    test(
+      Expr("{}"), ObjE
+    )
+
+    // test-objparser-objget
+    test(
+      Expr("{}.x"), ObjGet(ObjE, "x")
+    )
+
+    // test-objparser-objset-1
+    test(
+      Expr("{}.y = 3; 0"), ObjSet(ObjE, "y", IntE(3), IntE(0))
+    )
+
+    // test-objparser-objset-2
+    test(
+      Expr("{}.x.y = 3; 0"), ObjSet(ObjGet(ObjE, "x"), "y", IntE(3), IntE(0))
+    )
+
     test(
       Expr(
         """
@@ -176,7 +196,7 @@ package object midterm extends Midterm {
 
     // ProtoParser
     test(
-      Expr("class[(this) => this, {extends {}}]()->x()"),
+      Expr("class [(this) => this, {}]()->x()"),
       App(ProtoMethod(
         App(ProtoClass(
           Fun("this" :: Nil, Id("this")),
@@ -188,7 +208,7 @@ package object midterm extends Midterm {
 
     test(run(
       """
-      val AnimalPrototype = {extends Object};
+      val AnimalPrototype = {};
       AnimalPrototype.age = 0;
       AnimalPrototype.newYear = (this) => this.age = this.age + 1; this.age;
 
@@ -196,9 +216,9 @@ package object midterm extends Midterm {
         this.age = age;
         this;
 
-      val Animal = class[AnimalConstructor, AnimalPrototype];
+      val Animal = class [AnimalConstructor, AnimalPrototype];
 
-      val ImmortalAnimalPrototype = {extends AnimalPrototype};
+      val ImmortalAnimalPrototype = {extends [AnimalPrototype]};
       ImmortalAnimalPrototype.newYear = (this) => this.age;
 
       val myAnimal = Animal(15);

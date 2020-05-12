@@ -20,12 +20,12 @@ trait Midterm extends Homework with RegexParsers {
   case class RecFuns(ds: List[FunDef], b: Expr) extends Expr // recursive function
   case class App(f: Expr, as: List[Expr]) extends Expr // function application
 
-  object Expr extends ParserObject(e)
+  object Expr extends ParserObject(eExpr)
 
   // Function definitions
   case class FunDef(n: String, ps: List[String], b: Expr)
 
-  object FunDef extends ParserObject(d)
+  object FunDef extends ParserObject(eFunDef)
 
   // Values
   sealed trait Value {
@@ -47,9 +47,11 @@ trait Midterm extends Homework with RegexParsers {
   abstract class ParserObject[T](parser: Parser[T]) {
     def apply(str: String): T = parseAll(parser, str).getOrElse(error(s"bad syntax: $str"))
   }
+
   private def wrapR[T](e: Parser[T]): Parser[T] = "(" ~> e <~ ")"
   private def wrapC[T](e: Parser[T]): Parser[T] = "{" ~> e <~ "}"
   private def wrapS[T](e: Parser[T]): Parser[T] = "[" ~> e <~ "]"
+
   private lazy val keywords = Set("true", "false", "val", "new", "def", "if", "else", "class", "extends")
   private lazy val n: Parser[Int] = "-?[0-9]+".r ^^ (_.toInt)
   private lazy val i: Parser[Int] = "_[1-9][0-9]*".r ^^ (_.tail.toInt)
@@ -58,20 +60,21 @@ trait Midterm extends Homework with RegexParsers {
   private lazy val x: Parser[String] =
     "[a-zA-Z_][a-zA-Z0-9_]*".r.withFilter(!keywords(_))
 
-  private lazy val e: Parser[Expr] =
-    (x <~ "=>") ~ e ^^ { case p ~ b => Fun(List(p), b) } |
-    ((wrapR(repsep(x, ",")) <~ "=>") ~ e).withFilter{
+  private lazy val eExpr: Parser[Expr] =
+    (x <~ "=>") ~ eExpr ^^ { case p ~ b => Fun(List(p), b) } |
+    ((wrapR(repsep(x, ",")) <~ "=>") ~ eExpr).withFilter{
       case ps ~ _ => ps.distinct.length == ps.length
-    } ^^ { case ps ~ b => Fun(ps, b) } | e1
+    } ^^ { case ps ~ b => Fun(ps, b) } |
+    eLogicalOr
 
-  private lazy val e1: Parser[Expr] =
-    rep1sep(e2, "||") ^^ (_.reduceLeft(Or))
+  private lazy val eLogicalOr: Parser[Expr] =
+    rep1sep(eLogicalAnd, "||") ^^ (_.reduceLeft(Or))
 
-  private lazy val e2: Parser[Expr] =
-    rep1sep(e3, "&&") ^^ (_.reduceLeft(And))
+  private lazy val eLogicalAnd: Parser[Expr] =
+    rep1sep(eComparator, "&&") ^^ (_.reduceLeft(And))
 
-  private lazy val e3: Parser[Expr] =
-    e4 ~ rep(("==" | "!=" | "<=" | "<" | ">=" | ">") ~ e4) ^^ {
+  private lazy val eComparator: Parser[Expr] =
+    eAddSub ~ rep(("==" | "!=" | "<=" | "<" | ">=" | ">") ~ eAddSub) ^^ {
       case e ~ es => es.foldLeft(e){
         case (l, "==" ~ r) => Eq(l, r)
         case (l, "!=" ~ r) => Neq(l, r)
@@ -82,42 +85,41 @@ trait Midterm extends Homework with RegexParsers {
       }
     }
 
-  private lazy val e4: Parser[Expr] =
-    e5 ~ rep(("+" | "-") ~ e5) ^^ { case e ~ es => es.foldLeft(e){
+  private lazy val eAddSub: Parser[Expr] =
+    eMultDivMod ~ rep(("+" | "-") ~ eMultDivMod) ^^ { case e ~ es => es.foldLeft(e){
       case (l, "+" ~ r) => Add(l, r)
       case (l,  _  ~ r) => Sub(l, r)
     }}
 
-  private lazy val e5: Parser[Expr] =
-    e6 ~ rep(("*" | "/" | "%") ~ e6) ^^ { case e ~ es => es.foldLeft(e){
+  private lazy val eMultDivMod: Parser[Expr] =
+    eBool ~ rep(("*" | "/" | "%") ~ eBool) ^^ { case e ~ es => es.foldLeft(e){
       case (l, "*" ~ r) => Mul(l, r)
       case (l, "/" ~ r) => Div(l, r)
       case (l,  _  ~ r) => Mod(l, r)
     }}
 
-  private lazy val e6: Parser[Expr] =
-    "-" ~> e6 ^^ Neg | "!" ~> e6 ^^ Not | e7
+  private lazy val eBool: Parser[Expr] =
+    "-" ~> eBool ^^ Neg | "!" ~> eBool ^^ Not | eApp
 
-  private lazy val e7: Parser[Expr] =
-    e8 ~ rep(
-      wrapR(repsep(e, ",")) ^^ AppP
+  private lazy val eApp: Parser[Expr] =
+    eObjProto ~ rep(
+      wrapR(repsep(eExpr, ",")) ^^ AppP
     ) ^^ { case e ~ es => es.foldLeft(e){
       case (f, AppP(as)) => App(f, as)
     }}
 
-  private lazy val e8: Parser[Expr] =
+  private lazy val eAtom: Parser[Expr] =
     x ^^ Id | n ^^ IntE | b ^^ BooleanE |
-    ("if" ~> wrapR(e)) ~ e ~ ("else" ~> e) ^^ { case c ~ t ~ f => If(c, t, f) } |
-    ("val" ~> x <~ "=") ~ e ~ (";" ~> e) ^^ { case x ~ e ~ b => Val(x, e, b) } |
-    (rep1(d) ~ e).withFilter{ case ds ~ _ =>
+    ("if" ~> wrapR(eExpr)) ~ eExpr ~ ("else" ~> eExpr) ^^ { case c ~ t ~ f => If(c, t, f) } |
+    ("val" ~> x <~ "=") ~ eExpr ~ (";" ~> eExpr) ^^ { case x ~ e ~ b => Val(x, e, b) } |
+    (rep1(eFunDef) ~ eExpr).withFilter{ case ds ~ _ =>
       val names = ds.map(_.n)
       names.distinct.length == names.length
     } ^^ { case ds ~ b => RecFuns(ds, b) } |
-    //eObjProto |
-    wrapC(e)
+    wrapR(eExpr)
 
-  private lazy val d: Parser[FunDef] =
-    (("def" ~> x) ~ wrapR(repsep(x, ",")) ~ ("=" ~> e <~ ";")).withFilter{
+  private lazy val eFunDef: Parser[FunDef] =
+    (("def" ~> x) ~ wrapR(repsep(x, ",")) ~ ("=" ~> eExpr <~ ";")).withFilter{
       case _ ~ ps ~ _ => ps.distinct.length == ps.length
     } ^^ {
       case n ~ ps ~ b => FunDef(n, ps, b)
@@ -149,17 +151,26 @@ trait Midterm extends Homework with RegexParsers {
   }
 
   // ================== Midterm Code ==================
-  private lazy val eObjProto: Parser[Expr] = eObj | eProto
+  private lazy val eObjProto: Parser[Expr] = eObj | eObjProtoAtom
+  private lazy val eObjProtoAtom = eObjAtom | eProtoAtom
 
   // Object
   private lazy val eObj: Parser[Expr] =
-    "{}" ^^^ ObjE |
-    e ~ (("." ~> x) <~ "=") ~ e ~ (";" ~> e) ^^ {
+    eObjProtoAtom ~ ("." ~> x <~ "=") ~ eExpr ~ (";" ~> eExpr) ^^ {
       case obj ~ key ~ value ~ body => ObjSet(obj, key, value, body)
-    } |
-    e ~ ("." ~> x) ^^ {
-      case obj ~ key => ObjGet(obj, key)
     }
+
+  private lazy val eObjAtom: Parser[Expr] =
+    (eAtom | eObjAtom2) ~ rep1("." ~> x) ^^ {
+      case obj ~ keys => keys.foldLeft(obj){
+        case (prev, curr) => ObjGet(prev, curr)
+      }
+    } |
+    eObjAtom2
+
+  private lazy val eObjAtom2: Parser[Expr] =
+    "{}" ^^^ ObjE |
+    eAtom
 
   type FiberKey = String
   type FiberValue = Value
@@ -174,15 +185,17 @@ trait Midterm extends Homework with RegexParsers {
   }
 
   // Prototype
-  private lazy val eProto: Parser[Expr] =
-    wrapC("extends" ~> e) ^^ {
+  private lazy val eProtoAtom: Parser[Expr] =
+    wrapC("extends" ~> wrapS(eExpr)) ^^ {
       case baseObj => ProtoE(baseObj)
     } |
-    "class" ~> wrapS((e <~ ",") ~ e) ^^ {
+    "class" ~> wrapS((eExpr <~ ",") ~ eExpr) ^^ {
       case const ~ proto => ProtoClass(const, proto)
     } |
-    (e <~ "->") ~ x ^^ {
-      case obj ~ key => ProtoMethod(obj, key)
+    eObjAtom ~ rep1("->" ~> x) ^^ {
+      case obj ~ keys => keys.foldLeft(obj){
+        case (prev, curr) => ProtoMethod(prev, curr)
+      }
     }
 
   case class ProtoE(baseObj: Expr) extends Expr // create object from prototype object
