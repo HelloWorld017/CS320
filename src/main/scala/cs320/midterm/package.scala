@@ -1,7 +1,12 @@
 package cs320
 
 package object midterm extends Midterm {
-  private def malloc(sto: ObjStore): Addr = (-1 :: sto.keys.toList).max + 1
+  private def malloc(store: ObjStore): Addr =
+    if (store.size > 0)
+      store.keysIterator.max + 1
+
+    else
+      0
 
   private def interpId(name: String, env: Env, sto: ObjStore): (Value, ObjStore) =
     env.get(name) match {
@@ -91,20 +96,43 @@ package object midterm extends Midterm {
     (ObjV(addr), sto + {addr -> Map[FiberKey, FiberValue]()})
   }
 
+  private def findFromPrototype(obj: Value, key: String, sto: ObjStore, stack: List[Addr] = Nil): Option[Value] = {
+    obj match {
+      case ObjV(addr) => {
+        if(stack.contains(addr))
+          None
+
+        else {
+          val objValue = sto(addr)
+
+          objValue.get(key) match {
+            case Some(value) => Some(value)
+            case None => {
+              objValue.get("$Prototype") match {
+                case Some(nextObj) => findFromPrototype(
+                    nextObj,
+                    key,
+                    sto,
+                    addr :: stack
+                  )
+
+                case None => None
+              }
+            }
+          }
+        }
+      }
+
+      case _ => error(s"TypeError: Cannot read property '$key' of illegal type: $obj")
+    }
+  }
+
   private def interpObjGet(obj: Expr, key: String, env: Env, sto: ObjStore): (Value, ObjStore) = {
     val (ov, os) = interp(obj, env, sto)
 
-    ov match {
-      case ObjV(addr) => sto.get(addr) match {
-          case Some(objValue) => objValue.get(key) match {
-              case Some(value) => (value, os)
-              case None => error(s"KeyError: the object has no such key: $key")
-            }
-
-          case None => error(s"UnknownError: the object variable points non-existing object")
-        }
-
-      case _ => error(s"TypeError: Cannot read property '$key' of illegal type: $obj")
+    findFromPrototype(ov, key, os) match {
+      case Some(value) => (value, os)
+      case None => error(s"KeyError: the object has no such key: $key")
     }
   }
 
@@ -114,16 +142,13 @@ package object midterm extends Midterm {
     val (ov, os) = interp(obj, env, sto)
 
     ov match {
-      case ObjV(addr) =>
-        sto.get(addr) match {
-          case Some(objValue) => {
-            val (vv, vs) = interp(value, env, os)
-            val newStore = vs + (addr -> (objValue + (key -> vv)))
+      case ObjV(addr) => {
+        val objValue = sto(addr)
+        val (vv, vs) = interp(value, env, os)
+        val newStore = vs + (addr -> (objValue + (key -> vv)))
 
-            interp(body, env, newStore)
-          }
-          case None => error(s"UnknownError: the object variable points non-existing object")
-        }
+        interp(body, env, newStore)
+      }
 
       case _ => error(s"TypeError: Cannot read property '$key' of illegal type: $obj")
     }
@@ -133,7 +158,40 @@ package object midterm extends Midterm {
     val (bov, bos) = interp(baseObj, env, sto)
 
     val addr = malloc(sto)
-    (ObjV(addr), sto + {addr -> {"$Prototype" -> bov}})
+    (ObjV(addr), sto + {addr -> Map("$Prototype" -> bov)})
+  }
+
+  private def thisCloV(funExpr: Expr, thisExpr: Expr, env: Env, sto: ObjStore): (Value, ObjStore) = {
+    val (fv, fs) = interp(funExpr, env, sto)
+
+    fv match {
+      case CloV(ps, body, fenv) => {
+        val applyingParameters = ps.drop(1).map(Id(_))
+
+        (
+          CloV(
+            ps.drop(1),
+            App(
+              ValueE(fv),
+              applyingParameters :+ thisExpr
+            ),
+            env
+          ),
+          fs
+        )
+      }
+
+      case _ => error(s"TypeError: given class function is not a function: $funExpr")
+    }
+  }
+
+  private def interpProtoClass(const: Expr, proto: Expr, env: Env, sto: ObjStore): (Value, ObjStore) =
+    thisCloV(const, ProtoE(proto), env, sto)
+
+  private def interpProtoMethod(obj: Expr, key: String, env: Env, sto: ObjStore): (Value, ObjStore) = {
+    val (ov, os) = interp(obj, env, sto)
+
+    thisCloV(ObjGet(ValueE(ov), key), ValueE(ov), env, os)
   }
 
   def interp(e: Expr, env: Env, sto: ObjStore): (Value, ObjStore) = e match {
@@ -163,6 +221,7 @@ package object midterm extends Midterm {
     case ObjSet(obj, key, value, body) => interpObjSet(obj, key, value, body, env, sto)
 
     // Prototypes
+    case ValueE(value) => (value, sto)
     case ProtoE(baseObj) => interpProto(baseObj, env, sto)
     case ProtoClass(const, proto) => interpProtoClass(const, proto, env, sto)
     case ProtoMethod(obj, key) => interpProtoMethod(obj, key, env, sto)
@@ -289,6 +348,20 @@ package object midterm extends Midterm {
       ), Nil)
     )
 
+    // Should not be evaluated twice
+    test(run(
+      """
+      val Counter = {};
+      Counter.x = 0;
+      (
+        Counter.x = Counter.x + 1;
+        val proto = {};
+        proto.fun = (this, a) => a;
+        (class [(this) => this, proto])()
+      )->fun(Counter.x)
+      """
+    ), "1")
+
     test(run(
       """
       val AnimalPrototype = {};
@@ -304,11 +377,17 @@ package object midterm extends Midterm {
       val ImmortalAnimalPrototype = {extends [AnimalPrototype]};
       ImmortalAnimalPrototype.newYear = (this) => this.age;
 
-      val myAnimal = Animal(15);
-      val immortalJellyfish = ImmortalAnimal(0);
+      val ImmortalAnimalConstructor = (this) =>
+        this.age = 9999;
+        this;
+
+      val ImmortalAnimal = class [ImmortalAnimalConstructor, ImmortalAnimalPrototype];
+
+      val myAnimal = Animal(0);
+      val immortalJellyfish = ImmortalAnimal();
 
       myAnimal->newYear() + immortalJellyfish->newYear()
       """
-    ), 16)
+    ), "10000")
   }
 }

@@ -192,12 +192,13 @@ trait Midterm extends Homework with RegexParsers {
   }
 
   // Prototype
+  case class ValueE(value: Value) extends Expr
   case class ProtoE(baseObj: Expr) extends Expr // create object from prototype object
   case class ProtoClass(const: Expr, proto: Expr) extends Expr // create class
   case class ProtoMethod(obj: Expr, key: String) extends Expr // get class method
 
   // Interpreter
-  def run(str: String): String = interp(Expr(str)).toString
-  def interp(expr: Expr): Value = interp(expr, Map.empty, Map.empty)
-  def interp(expr: Expr, env: Env, store: ObjStore): Value
+  def run(str: String): String = interp(Expr(str))._1.toString
+  def interp(expr: Expr): (Value, ObjStore) = interp(expr, Map.empty, Map.empty)
+  def interp(expr: Expr, env: Env, store: ObjStore): (Value, ObjStore)
 }
