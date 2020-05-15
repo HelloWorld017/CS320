@@ -176,8 +176,8 @@ trait Midterm extends Homework with RegexParsers {
     wrapC("extends" ~> wrapS(eExpr)) ^^ {
       case baseObj => ProtoE(baseObj)
     } |
-    "class" ~> wrapS((eExpr <~ ",") ~ eExpr) ^^ {
-      case const ~ proto => ProtoClass(const, proto)
+    "class" ~> wrapS(eExpr) ^^ {
+      case proto => ProtoClass(proto)
     } |
     eAtom
 
@@ -197,7 +197,7 @@ trait Midterm extends Homework with RegexParsers {
   // Prototype
   case class ValueE(value: Value) extends Expr
   case class ProtoE(baseObj: Expr) extends Expr // create object from prototype object
-  case class ProtoClass(const: Expr, proto: Expr) extends Expr // create class
+  case class ProtoClass(proto: Expr) extends Expr // create class
   case class ProtoMethod(obj: Expr, key: String) extends Expr // get class method
 
   // Interpreter

@@ -195,8 +195,19 @@ package object midterm extends Midterm {
     }
   }
 
-  private def interpProtoClass(const: Expr, proto: Expr, env: Env, sto: ObjStore): (Value, ObjStore) =
-    thisCloV(const, ProtoE(proto), env, sto)
+  private def interpProtoClass(proto: Expr, env: Env, sto: ObjStore): (Value, ObjStore) = {
+    val (ov, os) = interp(proto, env, sto)
+    val const = findFromPrototype(ov, "constructor", os) match {
+      case Some(value) => value match {
+        case funVal: CloV => funVal
+        case _ => error(s"TypeError: Cannot construct object from illegal type: $value")
+      }
+
+      case None => CloV("this" :: Nil, Id("this"), Map())
+    }
+
+    thisCloV(ValueE(const), ProtoE(proto), env, os)
+  }
 
   private def interpProtoMethod(obj: Expr, key: String, env: Env, sto: ObjStore): (Value, ObjStore) = {
     val (ov, os) = interp(obj, env, sto)
@@ -233,7 +244,7 @@ package object midterm extends Midterm {
     // Prototypes
     case ValueE(value) => (value, sto)
     case ProtoE(baseObj) => interpProto(baseObj, env, sto)
-    case ProtoClass(const, proto) => interpProtoClass(const, proto, env, sto)
+    case ProtoClass(proto) => interpProtoClass(proto, env, sto)
     case ProtoMethod(obj, key) => interpProtoMethod(obj, key, env, sto)
   }
 
@@ -366,10 +377,9 @@ package object midterm extends Midterm {
     // ---- ProtoParser ----
     // test-protoparser1
     test(
-      Expr("(class [(this) => this, {extends[{}]}]())->x()"),
+      Expr("(class [{extends[{}]}]())->x()"),
       App(ProtoMethod(
         App(ProtoClass(
-          Fun("this" :: Nil, Id("this")),
           ProtoE(ObjE)
         ), Nil),
         "x"
@@ -391,31 +401,37 @@ package object midterm extends Midterm {
     test(run(
       """
       val x = {};
+      set x.constructor = (this) => this;
       set x.x = (this) => this.y;
       set x.y = 1;
-      (class [ (this) => this, { extends [{ extends [x] }]} ]())->x()
+      (class [ { extends [{ extends [x] }]} ]())->x()
       """
     ), "1")
 
     test(Expr(
       """
       val x = {};
+      set x.constructor = (this) => this;
       set x.x = (this) => this.y;
       set x.y = 1;
-      (class [ (this) => this, { extends [{ extends [x] }]} ]())->x()
+      (class [ { extends [{ extends [x] }]} ]())->x()
       """
     ), Val("x", ObjE, ObjSet(
-      Id("x"), "x", Fun("this" :: Nil, ObjGet(Id("this"), "y")),
+      Id("x"), "constructor", Fun("this" :: Nil, Id("this")),
 
       ObjSet(
-        Id("x"), "y", IntE(1),
+        Id("x"), "x", Fun("this" :: Nil, ObjGet(Id("this"), "y")),
 
-        App(ProtoMethod(
-          App(
-            ProtoClass(Fun("this" :: Nil, Id("this")), ProtoE(ProtoE(Id("x")))), Nil
-          ),
-          "x"
-        ), Nil)
+        ObjSet(
+          Id("x"), "y", IntE(1),
+
+          App(ProtoMethod(
+            App(
+              ProtoClass(ProtoE(ProtoE(Id("x")))), Nil
+            ),
+            "x"
+          ), Nil)
+        )
       )
     )))
 
@@ -428,7 +444,7 @@ package object midterm extends Midterm {
         set Counter.x = Counter.x + 1;
         val proto = {};
         set proto.fun = (this, a) => a;
-        (class [(this) => this, proto])()
+        class [proto]()
       )->fun(Counter.x)
       """
     ), "1")
@@ -437,23 +453,21 @@ package object midterm extends Midterm {
     test(run(
       """
       val AnimalPrototype = {};
+      set AnimalPrototype.constructor = (this, age) =>
+        set this.age = age;
+        this;
       set AnimalPrototype.age = 0;
       set AnimalPrototype.newYear = (this) => set this.age = this.age + 1; this.age;
 
-      val AnimalConstructor = (this, age) =>
-        set this.age = age;
-        this;
-
-      val Animal = class [AnimalConstructor, AnimalPrototype];
+      val Animal = class [AnimalPrototype];
 
       val ImmortalAnimalPrototype = {extends [AnimalPrototype]};
-      set ImmortalAnimalPrototype.newYear = (this) => this.age;
-
-      val ImmortalAnimalConstructor = (this) =>
+      set ImmortalAnimalPrototype.constructor = (this) =>
         set this.age = 9999;
         this;
+      set ImmortalAnimalPrototype.newYear = (this) => this.age;
 
-      val ImmortalAnimal = class [ImmortalAnimalConstructor, ImmortalAnimalPrototype];
+      val ImmortalAnimal = class [ImmortalAnimalPrototype];
 
       val myAnimal = Animal(0);
       val immortalJellyfish = ImmortalAnimal();
