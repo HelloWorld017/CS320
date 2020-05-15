@@ -4,3 +4,4 @@ organization := "plrg.kaist.ac.kr"
 version := "1.0"
 libraryDependencies += "org.scala-lang.modules" %% "scala-parser-combinators" % "1.1.0"
 libraryDependencies += "org.scala-lang" % "scala-reflect" % scalaVersion.value
+scalacOptions ++= Seq("-unchecked", "-deprecation")

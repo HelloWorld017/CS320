@@ -97,6 +97,9 @@ package object midterm extends Midterm {
   }
 
   private def findFromPrototype(obj: Value, key: String, sto: ObjStore, stack: List[Addr] = Nil): Option[Value] = {
+    // print(s"Stack: $stack, Obj: $obj, Key: $key\n")
+    // print(s"Sto: $sto\n")
+
     obj match {
       case ObjV(addr) => {
         if(stack.contains(addr))
@@ -157,12 +160,19 @@ package object midterm extends Midterm {
   private def interpProto(baseObj: Expr, env: Env, sto: ObjStore): (Value, ObjStore) = {
     val (bov, bos) = interp(baseObj, env, sto)
 
-    val addr = malloc(sto)
-    (ObjV(addr), sto + {addr -> Map("$Prototype" -> bov)})
+    bov match {
+      case baseObjectValue: ObjV => {
+        val addr = malloc(bos)
+        (ObjV(addr), bos + {addr -> Map("$Prototype" -> baseObjectValue)})
+      }
+
+      case _ => error(s"TypeError: Cannot inherit from illegal type: $bov")
+    }
   }
 
   private def thisCloV(funExpr: Expr, thisExpr: Expr, env: Env, sto: ObjStore): (Value, ObjStore) = {
-    val (fv, fs) = interp(funExpr, env, sto)
+    val (fv, fsto) = interp(funExpr, env, sto)
+    val (pv, psto) = interp(thisExpr, env, fsto)
 
     fv match {
       case CloV(ps, body, fenv) => {
@@ -173,11 +183,11 @@ package object midterm extends Midterm {
             ps.drop(1),
             App(
               ValueE(fv),
-              applyingParameters :+ thisExpr
+              applyingParameters :+ ValueE(pv)
             ),
             env
           ),
-          fs
+          psto
         )
       }
 
@@ -294,33 +304,50 @@ package object midterm extends Midterm {
       f(10)
     """), "55")
 
-    // ================== Midterm Code ==================
-    // ObjParser
-    // test-objparser-obje
+    // ================== Midterm Test ==================
+    // ---- ObjParser ----
+    // test-objparser1 (ObjE)
     test(
       Expr("{}"), ObjE
     )
 
-    // test-objparser-objget
+    // test-objparser2 (ObjGet)
     test(
       Expr("{}.x"), ObjGet(ObjE, "x")
     )
 
-    // test-objparser-objset-1
+    // test-objparser3 (ObjSet)
     test(
-      Expr("{}.y = 3; 0"), ObjSet(ObjE, "y", IntE(3), IntE(0))
+      Expr("set {}.y = 3; 0"), ObjSet(ObjE, "y", IntE(3), IntE(0))
     )
 
-    // test-objparser-objset-2
+    // test-objparser4 (Nested ObjSet)
     test(
-      Expr("{}.x.y = 3; 0"), ObjSet(ObjGet(ObjE, "x"), "y", IntE(3), IntE(0))
+      Expr("set {}.x.y = 3; 0"), ObjSet(ObjGet(ObjE, "x"), "y", IntE(3), IntE(0))
     )
 
+    // test-objparser5
+    test(
+      Expr("set {}.x.y.z.a.b.c.d.e.f.g.h.i.j.k = 3; 0"),
+      ObjSet(
+        ObjGet(ObjGet(ObjGet(ObjGet(
+          ObjGet(ObjGet(ObjGet(ObjGet(
+            ObjGet(ObjGet(ObjGet(ObjGet(
+              ObjGet(ObjE, "x"),
+            "y"), "z"), "a"), "b"),
+          "c"), "d"), "e"), "f"),
+        "g"), "h"), "i"), "j"),
+
+        "k", IntE(3), IntE(0)
+      )
+    )
+
+    // test-objparser6
     test(
       Expr(
         """
         val obj = {};
-        obj.x = 1;
+        set obj.x = 1;
         obj.x
         """
       ),
@@ -336,7 +363,8 @@ package object midterm extends Midterm {
       )
     )
 
-    // ProtoParser
+    // ---- ProtoParser ----
+    // test-protoparser1
     test(
       Expr("(class [(this) => this, {extends[{}]}]())->x()"),
       App(ProtoMethod(
@@ -348,37 +376,81 @@ package object midterm extends Midterm {
       ), Nil)
     )
 
-    // Should not be evaluated twice
+    // ---- ObjInterpreter ----
+    // test-obj1 (ObjE)
+    test(run("{}"), "<object 0>")
+
+    // test-obj2 (ObjGet / Set)
+    test(run("val obj = {}; set obj.x = 1; obj.x"), "1")
+
+    // test-obj3 (Nested ObjGet / Set)
+    test(run("val obj = {}; set obj.x = {}; set obj.x.y = 1; obj.x.y"), "1")
+
+    // ---- ProtoInterpreter ----
+    // test-proto1
+    test(run(
+      """
+      val x = {};
+      set x.x = (this) => this.y;
+      set x.y = 1;
+      (class [ (this) => this, { extends [{ extends [x] }]} ]())->x()
+      """
+    ), "1")
+
+    test(Expr(
+      """
+      val x = {};
+      set x.x = (this) => this.y;
+      set x.y = 1;
+      (class [ (this) => this, { extends [{ extends [x] }]} ]())->x()
+      """
+    ), Val("x", ObjE, ObjSet(
+      Id("x"), "x", Fun("this" :: Nil, ObjGet(Id("this"), "y")),
+
+      ObjSet(
+        Id("x"), "y", IntE(1),
+
+        App(ProtoMethod(
+          App(
+            ProtoClass(Fun("this" :: Nil, Id("this")), ProtoE(ProtoE(Id("x")))), Nil
+          ),
+          "x"
+        ), Nil)
+      )
+    )))
+
+    // test-proto2 (Should not be evaluated twice)
     test(run(
       """
       val Counter = {};
-      Counter.x = 0;
+      set Counter.x = 0;
       (
-        Counter.x = Counter.x + 1;
+        set Counter.x = Counter.x + 1;
         val proto = {};
-        proto.fun = (this, a) => a;
+        set proto.fun = (this, a) => a;
         (class [(this) => this, proto])()
       )->fun(Counter.x)
       """
     ), "1")
 
+    // test-proto3 (Should be able to run long code)
     test(run(
       """
       val AnimalPrototype = {};
-      AnimalPrototype.age = 0;
-      AnimalPrototype.newYear = (this) => this.age = this.age + 1; this.age;
+      set AnimalPrototype.age = 0;
+      set AnimalPrototype.newYear = (this) => set this.age = this.age + 1; this.age;
 
       val AnimalConstructor = (this, age) =>
-        this.age = age;
+        set this.age = age;
         this;
 
       val Animal = class [AnimalConstructor, AnimalPrototype];
 
       val ImmortalAnimalPrototype = {extends [AnimalPrototype]};
-      ImmortalAnimalPrototype.newYear = (this) => this.age;
+      set ImmortalAnimalPrototype.newYear = (this) => this.age;
 
       val ImmortalAnimalConstructor = (this) =>
-        this.age = 9999;
+        set this.age = 9999;
         this;
 
       val ImmortalAnimal = class [ImmortalAnimalConstructor, ImmortalAnimalPrototype];

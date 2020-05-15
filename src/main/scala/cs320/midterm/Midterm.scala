@@ -52,7 +52,7 @@ trait Midterm extends Homework with RegexParsers {
   private def wrapC[T](e: Parser[T]): Parser[T] = "{" ~> e <~ "}"
   private def wrapS[T](e: Parser[T]): Parser[T] = "[" ~> e <~ "]"
 
-  private lazy val keywords = Set("true", "false", "val", "new", "def", "if", "else", "class", "extends")
+  private lazy val keywords = Set("true", "false", "val", "new", "def", "if", "else", "class", "extends", "set")
   private lazy val n: Parser[Int] = "-?[0-9]+".r ^^ (_.toInt)
   private lazy val i: Parser[Int] = "_[1-9][0-9]*".r ^^ (_.tail.toInt)
   private lazy val b: Parser[Boolean] =
@@ -153,8 +153,11 @@ trait Midterm extends Homework with RegexParsers {
   // ================== Midterm Code ==================
   // Parsers
   private lazy val eObjProto: Parser[Expr] =
-    (eObjGet <~ "=") ~ eExpr ~ (";" ~> eExpr) ^^ {
+    // "set" keyword: A temporal workaround for catastrophic backtracking
+    "set" ~> eObjGet ~ ("=" ~> eExpr <~ ";") ~ eExpr ^^ {
       case ObjGet(obj, key) ~ value ~ body => ObjSet(obj, key, value, body)
+      // case ProtoMethod(obj, key) ~ value ~ body => ObjSet(obj, key, value, body)
+      case _ => error(s"SyntaxError: cannot set a value with prototype method expression.")
     } |
     eObjProtoAtom
 
@@ -188,7 +191,7 @@ trait Midterm extends Homework with RegexParsers {
   case class ObjGet(obj: Expr, key: String) extends Expr // object get value
   case class ObjSet(obj: Expr, key: String, value: Expr, body: Expr) extends Expr // object set value
   case class ObjV(addr: Addr) extends Value {
-    override def toString: String = "<object>"
+    override def toString: String = s"<object $addr>"
   }
 
   // Prototype
