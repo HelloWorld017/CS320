@@ -172,7 +172,6 @@ package object midterm extends Midterm {
 
   private def thisCloV(funExpr: Expr, thisExpr: Expr, env: Env, sto: ObjStore): (Value, ObjStore) = {
     val (fv, fsto) = interp(funExpr, env, sto)
-    val (pv, psto) = interp(thisExpr, env, fsto)
 
     fv match {
       case CloV(ps, body, fenv) => {
@@ -183,11 +182,11 @@ package object midterm extends Midterm {
             ps.drop(1),
             App(
               ValueE(fv),
-              applyingParameters :+ ValueE(pv)
+              applyingParameters :+ thisExpr
             ),
             env
           ),
-          psto
+          fsto
         )
       }
 
@@ -475,5 +474,23 @@ package object midterm extends Midterm {
       myAnimal->newYear() + immortalJellyfish->newYear()
       """
     ), "10000")
+
+    // test-proto4 (Change value of prototype changes all; change value of object changes itself)
+    test(run(
+      """
+      val proto1 = {};
+      set proto1.x = 0;
+
+      val cl = class [proto1];
+      val ob1 = cl();
+      val ob2 = cl();
+      val ob3 = cl();
+
+      set ob3.x = 10;
+      set proto1.x = 100;
+
+      ob1.x + ob2.x + ob3.x
+      """
+    ), "210")
   }
 }
