@@ -1,27 +1,128 @@
 package cs320
 
 package object proj03 extends Project03 {
-  type Store = Map[Addr, Value]
-  type TypeEnv = Map[String, Type]
-
   def typeCheck(e: Typed.Expr): Typed.Type = T.typeCheck(e)
   def interp(e: Untyped.Expr): Untyped.Value = U.interp(e)
+
+  private def assert(c: Boolean, msg: String): Unit =
+    if(!c)
+      error(msg)
 
   object T {
     import Typed._
 
-    def typeCheckId(x: String, ts: List[Type], env: TypeEnv): Type =
-      ts.get(x) match {
-        case Some(t) => t
-        case None => error(s"ReferenceError: $x is not defined")
+    type TypeEnv = Map[String, TypeValue]
+
+    sealed trait TypeValue
+    case class TypeScheme(typ: Type, targs: List[VarT], mutable: Boolean) extends TypeValue
+    case class TypeDefinition(variants: List[Variant], variables: List[String]) extends TypeValue
+
+    private def isWellFormed(t: Type, env: TypeEnv): Boolean =
+      t match {
+        case IntT => true
+        case BooleanT => true
+        case UnitT => true
+        case VarT(name) => env.contains(name)
+        case AppT(name, targs) =>
+          (
+            targs.forall(isWellFormed(_, env)) &&
+            (env.get(name) match {
+              case Some(TypeDefinition(variants, variables)) => {
+                variables.length == targs.length
+              }
+
+              case _ => false
+            })
+          )
+        case ArrowT(ptypes, rtype) =>
+          ptypes.forall(isWellFormed(_, env)) && isWellFormed(rtype, env)
       }
 
-    def typeCheck(expr: Expr, env: Env): Type =
+    private def assertWellFormed(t: Type, env: TypeEnv): Unit =
+      assert(isWellFormed(t, env), s"TypeError: $t is not well-formed")
+
+    private def substituteType(needles: Map[String, Type], haystack: Type): Type =
+      haystack match {
+        case IntT => haystack
+        case BooleanT => haystack
+        case UnitT => haystack
+        case VarT(name) =>
+          needles.get(name) match {
+            case Some(target) => target
+            case None => haystack
+          }
+
+        case AppT(name, targs) =>
+          AppT(name, targs.map(substituteType(needles, _)))
+
+        case ArrowT(ptypes, rtype) =>
+          ArrowT(ptypes.map(substituteType(needles, _)), substituteType(needles, rtype))
+      }
+
+    private def typeCheckId(x: String, ts: List[Type], env: TypeEnv): Type = {
+      ts.foreach(t => assertWellFormed(t, env))
+      env.get(x) match {
+        case Some(TypeScheme(typ, targs, _)) => {
+          val paramsLen = targs.length
+          val argsLen = ts.length
+
+          assert(
+            targs.length == ts.length,
+            s"TypeError: $x takes $paramsLen parameters, but $argsLen arguments were given"
+          )
+
+          substituteType(Map() ++ targs.map(_.name).zip(ts), typ)
+        }
+
+        case _ => error(s"ReferenceError: $x is not defined")
+      }
+    }
+
+    private def typeCheckIntOp(left: Expr, right: Expr, env: TypeEnv, returnType: Type): Type = {
+      assert(
+        typeCheck(left, env) == IntT && typeCheck(right, env) == IntT,
+        s"TypeError: Integer operation on illegal type"
+      )
+      returnType
+    }
+
+    private def typeCheckSequence(left: Expr, right: Expr, env: TypeEnv): Type = {
+      assertWellFormed(typeCheck(left, env))
+      typeCheck(right, env)
+    }
+
+    private def typeCheckIf(cond: Expr, tExpr: Expr, fExpr: Expr, env: TypeEnv): Type = {
+      assert(
+        typeCheck(cond, env) == BooleanT,
+        s"TypeError: Boolean operation on illegal type: $cond"
+      )
+
+      val returnType = typeCheck(tExpr, env)
+
+      assert(
+        returnType == typeCheck(fExpr, env),
+        s"TypeError: If-else clause has different type"
+      )
+      
+      returnType
+    }
+
+    def typeCheck(expr: Expr, env: TypeEnv): Type =
       expr match {
         case Id(x, ts) => typeCheckId(x, ts, env)
         case IntE(_) => IntT
         case BooleanE(_) => BooleanT
         case UnitE => UnitT
+        case Add(left, right) => typeCheckIntOp(left, right, env, IntT)
+        case Mul(left, right) => typeCheckIntOp(left, right, env, IntT)
+        case Div(left, right) => typeCheckIntOp(left, right, env, IntT)
+        case Mod(left, right) => typeCheckIntOp(left, right, env, IntT)
+        case Eq(left, right) => typeCheckIntOp(left, right, env, BooleanT)
+        case Lt(left, right) => typeCheckIntOp(left, right, env, BooleanT)
+        case Sequence(left, right) => typeCheckSequence(left, right, env)
+        case If(cond, texpr, fexpr) => typeCheckIf(cond, texpr, fexpr, env)
+
+        case _ => UnitT
       }
 
     def typeCheck(expr: Expr): Type = typeCheck(expr, Map.empty)
@@ -29,6 +130,8 @@ package object proj03 extends Project03 {
 
   object U {
     import Untyped._
+
+    type Store = Map[Addr, Value]
 
     def interp(expr: Expr, env: Env, sto: Store): Value =
       expr match {
