@@ -11,22 +11,33 @@ package object proj03 extends Project03 {
   object T {
     import Typed._
 
-    type TypeEnv = Map[String, TypeValue]
+    private type TypeEnv = Map[TypeKey, TypeValue]
 
-    sealed trait TypeValue
-    case class TypeScheme(typ: Type, targs: List[VarT], mutable: Boolean) extends TypeValue
-    case class TypeDefinition(variants: List[Variant], variables: List[String]) extends TypeValue
+    private sealed trait TypeKey
+    private case class TypeName(name: String) extends TypeKey
+    private case class TypeIdentifier(name: String) extends TypeKey
+    private case class TypeVariable(variable: VarT) extends TypeKey
+
+    private sealed trait TypeValue
+    private case class TypeScheme(typ: Type, targs: List[VarT], mutable: Boolean) extends TypeValue
+    private case class TypeDefinition(variants: List[Variant], variables: List[VarT]) extends TypeValue
+    private case object TypeVariableValue extends TypeValue
 
     private def isWellFormed(t: Type, env: TypeEnv): Boolean =
       t match {
         case IntT => true
         case BooleanT => true
         case UnitT => true
-        case VarT(name) => env.contains(name)
+        case vt: VarT =>
+          env.get(TypeVariable(vt)) match {
+            case Some(TypeVariableValue) => true
+            case _ => false
+          }
+
         case AppT(name, targs) =>
           (
             targs.forall(isWellFormed(_, env)) &&
-            (env.get(name) match {
+            (env.get(TypeName(name)) match {
               case Some(TypeDefinition(variants, variables)) => {
                 variables.length == targs.length
               }
@@ -61,7 +72,7 @@ package object proj03 extends Project03 {
 
     private def typeCheckId(x: String, ts: List[Type], env: TypeEnv): Type = {
       ts.foreach(t => assertWellFormed(t, env))
-      env.get(x) match {
+      env.get(TypeIdentifier(x)) match {
         case Some(TypeScheme(typ, targs, _)) => {
           val paramsLen = targs.length
           val argsLen = ts.length
@@ -87,7 +98,7 @@ package object proj03 extends Project03 {
     }
 
     private def typeCheckSequence(left: Expr, right: Expr, env: TypeEnv): Type = {
-      assertWellFormed(typeCheck(left, env))
+      typeCheck(left, env)
       typeCheck(right, env)
     }
 
@@ -103,11 +114,229 @@ package object proj03 extends Project03 {
         returnType == typeCheck(fExpr, env),
         s"TypeError: If-else clause has different type"
       )
-      
+
       returnType
     }
 
-    def typeCheck(expr: Expr, env: TypeEnv): Type =
+    private def typeCheckVal(
+      mut: Boolean, name: String, typ: Option[Type], expr: Expr, body: Expr, env: TypeEnv
+    ): Type = {
+      val exprType = typ match {
+        case Some(typeVal) => {
+          assertWellFormed(typeVal, env)
+
+          val exprType = typeCheck(expr, env)
+          assert(exprType == typeVal, s"TypeError: Cannot instantiate $typeVal variable with $exprType")
+
+          exprType
+        }
+        case _ => typeCheck(expr, env)
+      }
+
+      typeCheck(body, env + (TypeIdentifier(name) -> TypeScheme(exprType, Nil, mut)))
+    }
+
+    private def typeCheckRecBinds(defs: List[RecDef], body: Expr, env: TypeEnv) = {
+      val finalEnv = defs.foldLeft(env)(
+        (prevEnv, recdef) => recdef match {
+          case TypeDef(name, tparams, variants) => {
+            assert(
+              !prevEnv.contains(TypeIdentifier(name)),
+              s"ReferenceError: Type name '$name' has already been declared"
+            )
+
+            val targs = tparams.map(VarT(_))
+
+            prevEnv + (
+              TypeName(name) -> TypeDefinition(variants, targs)
+            ) ++ (
+              variants.map(variant => (
+                TypeIdentifier(variant.name) -> TypeScheme(
+                  {
+                    if(variant.params.length > 0)
+                      ArrowT(variant.params, AppT(name, targs))
+
+                    else
+                      AppT(name, targs)
+                  },
+                  targs,
+                  false
+                )
+              ))
+            )
+          }
+
+          case RecFun(name, tparams, params, rtype, _) => {
+            prevEnv + (TypeIdentifier(name) -> TypeScheme(
+              ArrowT(params.map(_._2), rtype),
+              tparams.map(VarT(_)),
+              false
+            ))
+          }
+
+          case Lazy(name, typ, expr) => {
+            prevEnv + (TypeIdentifier(name) -> TypeScheme(
+              typ,
+              Nil,
+              false
+            ))
+          }
+        }
+      )
+
+      defs.foreach(_ match {
+        case TypeDef(name, tparams, variants) => {
+          assert(
+            tparams.forall(paramName => !finalEnv.contains(TypeName(paramName))),
+            s"ReferenceError: Type name '$name' has already been declared"
+          )
+
+          val newEnv = finalEnv ++ (tparams.map(param => (TypeVariable(VarT(param)) -> TypeVariableValue)))
+
+          variants.foreach(variant =>
+            variant.params.foreach(param => assertWellFormed(param, newEnv))
+          )
+        }
+
+        case RecFun(name, tparams, params, rtype, body) => {
+          assert(
+            tparams.forall(paramName => !finalEnv.contains(TypeName(paramName))),
+            s"ReferenceError: Type name '$name' has already been declared"
+          )
+
+          val newEnv = finalEnv ++ (tparams.map(param => (TypeVariable(VarT(param)) -> TypeVariableValue)))
+          params.map(_._2).foreach(param => assertWellFormed(param, newEnv))
+          assertWellFormed(rtype, newEnv)
+
+          val newNewEnv = newEnv ++ (params.map(param => {
+            (TypeIdentifier(param._1) -> TypeScheme(param._2, Nil, false))
+          }))
+
+          assert(
+            typeCheck(body, newNewEnv) == rtype,
+            s"TypeError: Return type $rtype does not match"
+          )
+        }
+
+        case Lazy(name, typ, expr) => {
+          assertWellFormed(typ, finalEnv)
+          assert(
+            typeCheck(expr, finalEnv) == typ,
+            s"TypeError: the type of lazy evaluation does not match with $typ"
+          )
+        }
+      })
+
+      typeCheck(body, finalEnv)
+    }
+
+    private def typeCheckFun(params: List[(String, Type)], body: Expr, env: TypeEnv): Type = {
+      val paramTypes = params.map(_._2)
+      paramTypes.foreach(assertWellFormed(_, env))
+
+      val newEnv = params.foldLeft(env)((env, param) => env + (TypeIdentifier(param._1) -> TypeScheme(
+        param._2,
+        Nil,
+        true
+      )))
+
+      val rtype = typeCheck(body, newEnv)
+      ArrowT(paramTypes, rtype)
+    }
+
+    private def typeCheckAssign(name: String, expr: Expr, env: TypeEnv): Type =
+      env.get(TypeIdentifier(name)) match {
+        case Some(TypeScheme(typ, targs, mut)) => {
+          assert(targs.length == 0, s"TypeError: $name is not instantiated")
+          assert(mut, s"TypeError: $name is immutable")
+          assert(typ == typeCheck(expr, env), s"TypeError: assigning illegal type for $typ type")
+
+          UnitT
+        }
+
+        case _ => error(s"ReferenceError: Not defined: $name")
+      }
+
+    private def typeCheckApp(funExpr: Expr, args: List[Expr], env: TypeEnv): Type = {
+      val funType = typeCheck(funExpr, env) match {
+        case at: ArrowT => at
+        case _ => error(s"TypeError: function calling for illegal type")
+      }
+
+      var paramLen = funType.ptypes.length
+      var argsLen = args.length
+      assert(
+        argsLen == paramLen,
+        s"TypeError: function takes $paramLen parameters, but $argsLen arguments were given"
+      )
+
+      args.zipWithIndex.foreach(_ match {
+        case (arg, index) =>
+          assert(
+            typeCheck(arg, env) == funType.ptypes(index),
+            s"TypeError: illegal type given for $index-th parameter of function"
+          )
+      })
+
+      funType.rtype
+    }
+
+    private def typeCheckMatch(expr: Expr, cases: List[Case], env: TypeEnv): Type =
+      typeCheck(expr, env) match {
+        case AppT(name, targs) => {
+          env.get(TypeName(name)) match {
+            case Some(TypeDefinition(variants, variables)) => {
+              assert(
+                variables.length == targs.length,
+                s"TypeError: definition takes ${variables.length} parameters, but ${targs.length} arguments were given"
+              )
+
+              assert(
+                cases.length == variants.length,
+                s"TypeError: ${cases.length} cases exist for $name but ${variants.length} cases were given"
+              )
+
+              val variantMap = Map.empty ++ variants.map(_.name).zip(variants)
+              val caseTypes = cases.map(_ match {
+                case Case(variantName, names, body) => {
+                  val variant = variantMap.get(variantName) match {
+                    case Some(x) => x
+                    case None => error(s"TypeError: no matching type variant $variantName for $name")
+                  }
+
+                  assert(
+                    variant.params.length == names.length,
+                    s"TypeError: variant takes${variant.params.length} arguments, but got  ${names.length}"
+                  )
+
+                  val newParams = variant.params.map(paramType => {
+                    val needles = Map.empty ++ variables.map(_.name).zip(targs)
+                    substituteType(needles, paramType)
+                  })
+
+                  val newEnv = env ++ names
+                    .map(TypeIdentifier(_))
+                    .zip(newParams.map(TypeScheme(_, Nil, false)))
+
+                  typeCheck(body, newEnv)
+                }
+              })
+
+              assert(
+                caseTypes.forall(_ == caseTypes(0)),
+                s"TypeError: type differs for pattern matching cases"
+              )
+
+              caseTypes(0)
+            }
+
+            case _ => error(s"TypeError: non-existing definition for pattern matching")
+          }
+        }
+        case _ => error(s"TypeError: illegal type given for pattern matching")
+      }
+
+    private def typeCheck(expr: Expr, env: TypeEnv): Type =
       expr match {
         case Id(x, ts) => typeCheckId(x, ts, env)
         case IntE(_) => IntT
@@ -121,6 +350,12 @@ package object proj03 extends Project03 {
         case Lt(left, right) => typeCheckIntOp(left, right, env, BooleanT)
         case Sequence(left, right) => typeCheckSequence(left, right, env)
         case If(cond, texpr, fexpr) => typeCheckIf(cond, texpr, fexpr, env)
+        case Val(mut, name, typ, expr, body) => typeCheckVal(mut, name, typ, expr, body, env)
+        case RecBinds(defs, body) => typeCheckRecBinds(defs, body, env)
+        case Fun(params, body) => typeCheckFun(params, body, env)
+        case Assign(name, expr) => typeCheckAssign(name, expr, env)
+        case App(fun, args) => typeCheckApp(fun, args, env)
+        case Match(expr, cases) => typeCheckMatch(expr, cases, env)
 
         case _ => UnitT
       }
@@ -131,14 +366,14 @@ package object proj03 extends Project03 {
   object U {
     import Untyped._
 
-    type Store = Map[Addr, Value]
+    private type Store = Map[Addr, Value]
 
-    def interp(expr: Expr, env: Env, sto: Store): Value =
+    private def interp(expr: Expr, env: Env, sto: Store): Value =
       expr match {
-       case _ => IntV(0)
+       case _ => UnitV
      }
 
-     def interp(expr: Expr): Value = interp(expr, Map.empty, Map.empty)
+    def interp(expr: Expr): Value = interp(expr, Map.empty, Map.empty)
   }
 
   def tests: Unit = {
