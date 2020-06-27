@@ -368,12 +368,225 @@ package object proj03 extends Project03 {
 
     private type Store = Map[Addr, Value]
 
-    private def interp(expr: Expr, env: Env, sto: Store): Value =
-      expr match {
-       case _ => UnitV
-     }
+    private def ensureNonZero(op: (Int, Int) => Value): (Int, Int) => Value =
+      (x, y) => (x * y) match {
+        case 0 => error(s"Uncaught ArithmeticError: dividing by zero")
+        case _ => op(x, y)
+      }
 
-    def interp(expr: Expr): Value = interp(expr, Map.empty, Map.empty)
+    private def malloc(store: Store): Addr =
+      if (store.size > 0)
+        store.keysIterator.max + 1
+
+      else
+        0
+
+    private def interpId(name: String, env: Env, sto: Store): (Value, Store) = {
+      val addr = env.getOrElse(name, error(s"Uncaught ReferenceError: $name is not defined"))
+      val value = sto.getOrElse(addr, error(s"Uncaught SegmentationError: $addr points to non-existing value"))
+      value match {
+        case ExprV(expr, eenv) => {
+          interp(expr, eenv, sto) match {
+            case (newValue, newSto) => (newValue, newSto + (addr -> newValue))
+          }
+        }
+
+        case _ => (value, sto)
+      }
+    }
+
+    private def interpIntOp(op: (Int, Int) => Value): (Expr, Expr, Env, Store) => (Value, Store) =
+      (l, r, env, sto) => {
+        interp(l, env, sto) match {
+          case (IntV(x), newSto) => interp(r, env, newSto) match {
+            case (IntV(y), newNewSto) => (op(x, y), newNewSto)
+            case _ => error(s"Uncaught TypeError: making a integer operation on illegal type: $r")
+          }
+
+          case _ => error(s"Uncaught TypeError: making a integer operation on illegal type: $l")
+        }
+      }
+
+    private val interpIntAdd = interpIntOp((x, y) => IntV(x + y))
+    private val interpIntMul = interpIntOp((x, y) => IntV(x * y))
+    private val interpIntDiv = interpIntOp(ensureNonZero((x, y) => IntV(x / y)))
+    private val interpIntMod = interpIntOp(ensureNonZero((x, y) => IntV(x % y)))
+    private val interpIntEq = interpIntOp((x, y) => BooleanV(x == y))
+    private val interpIntLt = interpIntOp((x, y) => BooleanV(x < y))
+
+    private def interpSeq(e1: Expr, e2: Expr, env: Env, sto: Store): (Value, Store) = {
+      val (v1, newSto) = interp(e1, env, sto)
+      interp(e2, env, newSto)
+    }
+
+    private def interpIf(cond: Expr, texpr: Expr, fexpr: Expr, env: Env, sto: Store): (Value, Store) = {
+      val (condVal, newSto) = interp(cond, env, sto)
+      condVal match {
+        case BooleanV(true) => interp(texpr, env, newSto)
+        case BooleanV(false) => interp(fexpr, env, newSto)
+        case _=> error(s"Uncaught TypeError: Boolean operation on illegal type: $condVal")
+      }
+    }
+
+    private def interpVal(name: String, expr: Expr, body: Expr, env: Env, sto: Store): (Value, Store) = {
+      val (value, sto1) = interp(expr, env, sto)
+      val addr = malloc(sto1)
+      val newEnv = env + (name -> addr)
+      val newSto = sto1 + (addr -> value)
+
+      interp(body, newEnv, newSto)
+    }
+
+    private def interpRecBinds(defs: List[RecDef], body: Expr, env: Env, sto: Store): (Value, Store) = {
+      val (newEnv, newSto) = defs.foldLeft((env, sto))((envSto, recdef) => {
+        val (envi, stoi) = envSto
+
+        recdef match {
+          case Lazy(name, _) => {
+            val addr = malloc(stoi)
+            (envi + (name -> addr), stoi + (addr -> UnitV))
+          }
+
+          case RecFun(name, _, _) => {
+            val addr = malloc(stoi)
+            (envi + (name -> addr), stoi + (addr -> UnitV))
+          }
+
+          case TypeDef(variants) => {
+            variants.foldLeft((envi, stoi))((envStoi, variant) => {
+              val (envij, stoij) = envStoi
+              val addr = malloc(stoij)
+
+              (envij + (variant.name -> addr), stoij + (addr -> UnitV))
+            })
+          }
+        }
+      })
+
+      val newNewSto = defs.foldLeft((newSto))((newStoi, recdef) => {
+        recdef match {
+          case Lazy(name, expr) => {
+            val addr = newEnv.getOrElse(name, error(s"Uncaught InternalError"))
+            newStoi + (addr -> ExprV(expr, newEnv))
+          }
+
+          case RecFun(name, params, body) => {
+            val addr = newEnv.getOrElse(name, error(s"Uncaught InternalError"))
+            newStoi + (addr -> CloV(params, body, newEnv))
+          }
+
+          case TypeDef(variants) => {
+            variants.foldLeft(newStoi)((newStoij, variant) => {
+              val addr = newEnv.getOrElse(variant.name, error(s"Uncaught InternalError"))
+
+              if(variant.empty)
+                newStoij + (addr -> VariantV(variant.name, Nil))
+
+              else
+                newStoij + (addr -> ConstructorV(variant.name))
+            })
+          }
+        }
+      })
+
+      interp(body, newEnv, newNewSto)
+    }
+
+    private def interpAssign(name: String, expr: Expr, env: Env, sto: Store): (Value, Store) = {
+      val addr = env.getOrElse(name, error(s"Uncaught ReferenceError: $name is not defined"))
+      val (newVal, newSto) = interp(expr, env, sto)
+      (UnitV, newSto + (addr -> newVal))
+    }
+
+    private def interpApp(fun: Expr, args: List[Expr], env: Env, sto: Store): (Value, Store) = {
+      val (v, sto1) = interp(fun, env, sto)
+      val (argv, newSto) = args.foldLeft((List[Value](), sto1))((listSto, arg) => {
+        val (argList, stoi) = listSto
+        val (argi, stoi1) = interp(arg, env, stoi)
+
+        ((argList :+ argi), stoi1)
+      })
+
+      v match {
+        case CloV(params, body, fenv) => {
+          assert(
+            params.length == argv.length,
+            s"TypeError: $v takes ${params.length} parameters, but ${argv.length} arguments were given"
+          )
+
+          val (funEnv, funSto) = params.zip(argv).foldLeft((fenv, newSto))((envSto, paramArg) => {
+            val (funEnv, funSto) = envSto
+            val (paramName, argValue) = paramArg
+
+            val addr = malloc(funSto)
+
+            (funEnv + (paramName -> addr), funSto + (addr -> argValue))
+          })
+
+          interp(body, funEnv, funSto)
+        }
+
+        case ConstructorV(name) => {
+          (VariantV(name, argv), newSto)
+        }
+
+        case _ => error(s"Uncaught TypeError: calling for illegal type: $v")
+      }
+    }
+
+    private def interpMatch(expr: Expr, cases: List[Case], env: Env, sto: Store): (Value, Store) = {
+      val (v, sto1) = interp(expr, env, sto)
+      val varv = v match {
+        case vv: VariantV => vv
+        case _ => error(s"Uncaught TypeError: pattern matching for illegal type: $v")
+      }
+
+      val matchCase = cases.find(matchCase => matchCase.variant == varv.name).getOrElse(
+        error(s"Uncaught TypeError: no matching type variant ${varv.name}")
+      )
+
+      assert(
+        matchCase.names.length == varv.values.length,
+        s"TypeError: definition takes ${matchCase.names.length} parameters, " +
+        s"but ${varv.values.length} arguments were given"
+      )
+
+      val (newEnv, newSto) = matchCase.names.zip(varv.values).foldLeft((env, sto1))((envSto, nameValue) => {
+        val (argName, argValue) = nameValue
+        val (envi, stoi) = envSto
+
+        val addr = malloc(stoi)
+        (envi + (argName -> addr), stoi + (addr -> argValue))
+      })
+
+      interp(matchCase.body, newEnv, newSto)
+    }
+
+    private def interp(expr: Expr, env: Env, sto: Store): (Value, Store) =
+      expr match {
+        case Id(name) => interpId(name, env, sto)
+
+        case IntE(i) => (IntV(i), sto)
+        case BooleanE(b) => (BooleanV(b), sto)
+        case UnitE => (UnitV, sto)
+        case Fun(params, body) => (CloV(params, body, env), sto)
+
+        case Add(l, r) => interpIntAdd(l, r, env, sto)
+        case Mul(l, r) => interpIntMul(l, r, env, sto)
+        case Div(l, r) => interpIntDiv(l, r, env, sto)
+        case Mod(l, r) => interpIntMod(l, r, env, sto)
+        case Eq(l, r) => interpIntEq(l, r, env, sto)
+        case Lt(l, r) => interpIntLt(l, r, env, sto)
+        case Sequence(l, r) => interpSeq(l, r, env, sto)
+        case If(cond, texpr, fexpr) => interpIf(cond, texpr, fexpr, env, sto)
+        case Val(name, expr, body) => interpVal(name, expr, body, env, sto)
+        case RecBinds(defs, body) => interpRecBinds(defs, body, env, sto)
+        case Assign(name, expr) => interpAssign(name, expr, env, sto)
+        case App(fun, args) => interpApp(fun, args, env, sto)
+        case Match(expr, cases) => interpMatch(expr, cases, env, sto)
+      }
+
+    def interp(expr: Expr): Value = interp(expr, Map.empty, Map.empty)._1
   }
 
   def tests: Unit = {
